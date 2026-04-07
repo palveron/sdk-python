@@ -4,13 +4,26 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vexis-sdk"
-version = "0.4.0"
-description = "Official Python SDK for the VEXIS AI Governance Platform"
+version = "0.5.0"
+description = "Official Python SDK for the VEXIS AI Governance Platform — guardrails, audit trails, blockchain attestation"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
 authors = [{ name = "VEXIS", email = "sdk@vexis.io" }]
-keywords = ["ai-governance", "guardrails", "llm-security", "eu-ai-act", "compliance"]
+keywords = [
+    "ai-governance",
+    "guardrails",
+    "llm-security",
+    "eu-ai-act",
+    "compliance",
+    "vexis",
+    "ai-safety",
+    "pii-detection",
+    "audit-trail",
+    "blockchain-attestation",
+    "mcp",
+    "agentic-ai",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -36,8 +49,8 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "respx>=0.21", "mypy>=1.10", "ruff
 [project.urls]
 Homepage = "https://vexis.io"
 Documentation = "https://docs.vexis.io/sdk/python"
-Repository = "https://github.com/vexis-security/vexis-sdk-python"
-Changelog = "https://github.com/vexis-security/vexis-sdk-python/blob/main/CHANGELOG.md"
+Repository = "https://github.com/disruptivetrends/vexis-sdk-python"
+Changelog = "https://github.com/disruptivetrends/vexis-sdk-python/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["vexis"]
