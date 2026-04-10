@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vexis-sdk"
+name = "vexis-sdk-python"
 version = "0.5.0"
 description = "Official Python SDK for the VEXIS AI Governance Platform — guardrails, audit trails, blockchain attestation"
 readme = "README.md"
