@@ -1,12 +1,12 @@
 """
-VEXIS SDK for Python — Official AI Governance Client
+PALVERON SDK for Python — Official AI Governance Client
 =====================================================
 
 Usage::
 
-    from vexis import Vexis
+    from palveron import Palveron
 
-    client = Vexis(api_key="gp_live_xxx")
+    client = Palveron(api_key="pv_live_xxx")
     result = client.verify("Check this prompt for safety")
 
     if result.decision == "BLOCKED":
@@ -14,9 +14,9 @@ Usage::
 
 Async usage::
 
-    from vexis import AsyncVexis
+    from palveron import AsyncPalveron
 
-    client = AsyncVexis(api_key="gp_live_xxx")
+    client = AsyncPalveron(api_key="pv_live_xxx")
     result = await client.verify("Check this prompt")
 """
 
@@ -38,23 +38,23 @@ import httpx
 
 __version__ = "0.5.0"
 __all__ = [
-    "Vexis",
-    "AsyncVexis",
+    "Palveron",
+    "AsyncPalveron",
     "VerifyRequest",
     "VerifyResponse",
     "Attachment",
     "RequestContext",
     "Finding",
     "Decision",
-    "VexisError",
-    "VexisAuthenticationError",
-    "VexisRateLimitError",
-    "VexisValidationError",
-    "VexisTimeoutError",
-    "VexisCircuitOpenError",
+    "PalveronError",
+    "PalveronAuthenticationError",
+    "PalveronRateLimitError",
+    "PalveronValidationError",
+    "PalveronTimeoutError",
+    "PalveronCircuitOpenError",
 ]
 
-logger = logging.getLogger("vexis")
+logger = logging.getLogger("palveron")
 
 # ── Enums ────────────────────────────────────────────────────
 
@@ -180,8 +180,8 @@ class HealthResponse:
 # ── Errors ───────────────────────────────────────────────────
 
 
-class VexisError(Exception):
-    """Base error for all VEXIS SDK errors."""
+class PalveronError(Exception):
+    """Base error for all PALVERON SDK errors."""
 
     def __init__(
         self,
@@ -199,29 +199,29 @@ class VexisError(Exception):
         self.retryable = retryable
 
 
-class VexisAuthenticationError(VexisError):
+class PalveronAuthenticationError(PalveronError):
     def __init__(self, message: str = "Invalid API key", request_id: Optional[str] = None):
         super().__init__(message, code="AUTHENTICATION_FAILED", status_code=401, request_id=request_id)
 
 
-class VexisRateLimitError(VexisError):
+class PalveronRateLimitError(PalveronError):
     def __init__(self, message: str, retry_after_ms: int, request_id: Optional[str] = None):
         super().__init__(message, code="RATE_LIMITED", status_code=429, request_id=request_id, retryable=True)
         self.retry_after_ms = retry_after_ms
 
 
-class VexisValidationError(VexisError):
+class PalveronValidationError(PalveronError):
     def __init__(self, message: str, field: Optional[str] = None, request_id: Optional[str] = None):
         super().__init__(message, code="VALIDATION_ERROR", status_code=400, request_id=request_id)
         self.field = field
 
 
-class VexisTimeoutError(VexisError):
+class PalveronTimeoutError(PalveronError):
     def __init__(self, timeout_ms: float, request_id: Optional[str] = None):
         super().__init__(f"Request timed out after {timeout_ms:.0f}ms", code="TIMEOUT", status_code=408, request_id=request_id, retryable=True)
 
 
-class VexisCircuitOpenError(VexisError):
+class PalveronCircuitOpenError(PalveronError):
     def __init__(self) -> None:
         super().__init__("Circuit breaker open — too many consecutive failures", code="CIRCUIT_OPEN", status_code=503)
 
@@ -323,7 +323,7 @@ def _build_verify_body(request: VerifyRequest) -> dict[str, Any]:
 def _make_request_id() -> str:
     ts = hex(int(time.time() * 1000))[2:]
     rand = hashlib.md5(os.urandom(8)).hexdigest()[:6]
-    return f"vx_{ts}_{rand}"
+    return f"pv_{ts}_{rand}"
 
 
 def _backoff_delay(attempt: int, base: float = 0.5) -> float:
@@ -335,22 +335,22 @@ def _backoff_delay(attempt: int, base: float = 0.5) -> float:
 # ── Sync Client ──────────────────────────────────────────────
 
 
-class Vexis:
+class Palveron:
     """
-    Synchronous VEXIS client.
+    Synchronous PALVERON client.
 
     Args:
-        api_key: Your project API key (starts with ``gp_live_`` or ``gp_test_``).
-        base_url: Gateway URL. Defaults to ``https://gateway.vexis.io``.
+        api_key: Your project API key (starts with ``pv_live_`` or ``pv_test_``).
+        base_url: Gateway URL. Defaults to ``https://gateway.palveron.com``.
         timeout: Request timeout in seconds. Defaults to ``30.0``.
         max_retries: Maximum retry attempts on transient failures. Defaults to ``3``.
         headers: Extra headers added to every request.
 
     Example::
 
-        from vexis import Vexis
+        from palveron import Palveron
 
-        client = Vexis(api_key="gp_live_abc123")
+        client = Palveron(api_key="pv_live_abc123")
 
         # Simple check
         result = client.check("Is this prompt safe?")
@@ -359,7 +359,7 @@ class Vexis:
         result = client.verify_file("Analyze this", "/path/to/doc.pdf")
 
         # Full control
-        from vexis import VerifyRequest, Attachment
+        from palveron import VerifyRequest, Attachment
         result = client.verify(VerifyRequest(
             prompt="Check this image",
             attachments=[Attachment.from_file("photo.jpg")],
@@ -370,7 +370,7 @@ class Vexis:
         self,
         api_key: str,
         *,
-        base_url: str = "https://gateway.vexis.io",
+        base_url: str = "https://gateway.palveron.com",
         timeout: float = 30.0,
         max_retries: int = 3,
         headers: Optional[dict[str, str]] = None,
@@ -378,7 +378,7 @@ class Vexis:
         circuit_cooldown: float = 30.0,
     ):
         if not api_key:
-            raise VexisValidationError("api_key is required")
+            raise PalveronValidationError("api_key is required")
 
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -393,12 +393,12 @@ class Vexis:
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": f"vexis-sdk-python/{__version__}",
+                "User-Agent": f"palveron-sdk-python/{__version__}",
                 **(headers or {}),
             },
         )
 
-    def __enter__(self) -> Vexis:
+    def __enter__(self) -> Palveron:
         return self
 
     def __exit__(self, *args: Any) -> None:
@@ -441,7 +441,7 @@ class Vexis:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         if not self._circuit.can_request():
-            raise VexisCircuitOpenError()
+            raise PalveronCircuitOpenError()
 
         last_error: Optional[Exception] = None
         for attempt in range(self._max_retries + 1):
@@ -463,63 +463,63 @@ class Vexis:
 
             except (httpx.TimeoutException,):
                 self._circuit.on_failure()
-                last_error = VexisTimeoutError(self._timeout * 1000, request_id)
+                last_error = PalveronTimeoutError(self._timeout * 1000, request_id)
             except (httpx.ConnectError, httpx.NetworkError):
                 self._circuit.on_failure()
-                last_error = VexisError("Network error", code="NETWORK_ERROR", status_code=0, retryable=True)
-            except VexisError as e:
+                last_error = PalveronError("Network error", code="NETWORK_ERROR", status_code=0, retryable=True)
+            except PalveronError as e:
                 if not e.retryable:
                     raise
                 last_error = e
 
-        raise last_error or VexisError("Max retries exceeded", code="MAX_RETRIES")
+        raise last_error or PalveronError("Max retries exceeded", code="MAX_RETRIES")
 
     def _handle_error(self, resp: httpx.Response, request_id: str, attempt: int) -> None:
         if resp.status_code == 401:
-            raise VexisAuthenticationError(request_id=request_id)
+            raise PalveronAuthenticationError(request_id=request_id)
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("retry-after", "5")) * 1000
-            raise VexisRateLimitError("Rate limit exceeded", retry_after, request_id)
+            raise PalveronRateLimitError("Rate limit exceeded", retry_after, request_id)
         if resp.status_code == 400:
             body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            raise VexisValidationError(body.get("error", "Bad request"), body.get("field"), request_id)
+            raise PalveronValidationError(body.get("error", "Bad request"), body.get("field"), request_id)
         if resp.status_code >= 500:
             self._circuit.on_failure()
-            raise VexisError(f"Server error {resp.status_code}", code="SERVER_ERROR", status_code=resp.status_code, request_id=request_id, retryable=True)
-        raise VexisError(f"HTTP {resp.status_code}", code="CLIENT_ERROR", status_code=resp.status_code, request_id=request_id)
+            raise PalveronError(f"Server error {resp.status_code}", code="SERVER_ERROR", status_code=resp.status_code, request_id=request_id, retryable=True)
+        raise PalveronError(f"HTTP {resp.status_code}", code="CLIENT_ERROR", status_code=resp.status_code, request_id=request_id)
 
 
 # ── Async Client ─────────────────────────────────────────────
 
 
-class AsyncVexis:
+class AsyncPalveron:
     """
-    Async VEXIS client for asyncio applications.
+    Async PALVERON client for asyncio applications.
 
     Example::
 
         import asyncio
-        from vexis import AsyncVexis
+        from palveron import AsyncPalveron
 
         async def main():
-            async with AsyncVexis(api_key="gp_live_abc") as client:
+            async with AsyncPalveron(api_key="pv_live_abc") as client:
                 result = await client.verify("Check this")
                 print(result.decision)
 
         asyncio.run(main())
     """
 
-    def __init__(self, api_key: str, *, base_url: str = "https://gateway.vexis.io", timeout: float = 30.0, max_retries: int = 3, headers: Optional[dict[str, str]] = None, circuit_threshold: int = 5, circuit_cooldown: float = 30.0):
+    def __init__(self, api_key: str, *, base_url: str = "https://gateway.palveron.com", timeout: float = 30.0, max_retries: int = 3, headers: Optional[dict[str, str]] = None, circuit_threshold: int = 5, circuit_cooldown: float = 30.0):
         if not api_key:
-            raise VexisValidationError("api_key is required")
+            raise PalveronValidationError("api_key is required")
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._max_retries = max_retries
         self._circuit = _CircuitBreaker(circuit_threshold, circuit_cooldown)
-        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json", "User-Agent": f"vexis-sdk-python/{__version__}", **(headers or {})})
+        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json", "User-Agent": f"palveron-sdk-python/{__version__}", **(headers or {})})
 
-    async def __aenter__(self) -> AsyncVexis:
+    async def __aenter__(self) -> AsyncPalveron:
         return self
 
     async def __aexit__(self, *args: Any) -> None:
@@ -550,7 +550,7 @@ class AsyncVexis:
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         if not self._circuit.can_request():
-            raise VexisCircuitOpenError()
+            raise PalveronCircuitOpenError()
         last_error: Optional[Exception] = None
         for attempt in range(self._max_retries + 1):
             if attempt > 0:
@@ -564,25 +564,25 @@ class AsyncVexis:
                     return resp.json()
                 rid = resp.headers.get("x-request-id", request_id)
                 if resp.status_code == 401:
-                    raise VexisAuthenticationError(request_id=rid)
+                    raise PalveronAuthenticationError(request_id=rid)
                 if resp.status_code == 429:
-                    raise VexisRateLimitError("Rate limit exceeded", int(resp.headers.get("retry-after", "5")) * 1000, rid)
+                    raise PalveronRateLimitError("Rate limit exceeded", int(resp.headers.get("retry-after", "5")) * 1000, rid)
                 if resp.status_code == 400:
                     body = resp.json() if "json" in resp.headers.get("content-type", "") else {}
-                    raise VexisValidationError(body.get("error", "Bad request"), body.get("field"), rid)
+                    raise PalveronValidationError(body.get("error", "Bad request"), body.get("field"), rid)
                 if resp.status_code >= 500:
                     self._circuit.on_failure()
-                    last_error = VexisError(f"Server error {resp.status_code}", code="SERVER_ERROR", status_code=resp.status_code, request_id=rid, retryable=True)
+                    last_error = PalveronError(f"Server error {resp.status_code}", code="SERVER_ERROR", status_code=resp.status_code, request_id=rid, retryable=True)
                     continue
-                raise VexisError(f"HTTP {resp.status_code}", code="CLIENT_ERROR", status_code=resp.status_code, request_id=rid)
+                raise PalveronError(f"HTTP {resp.status_code}", code="CLIENT_ERROR", status_code=resp.status_code, request_id=rid)
             except (httpx.TimeoutException,):
                 self._circuit.on_failure()
-                last_error = VexisTimeoutError(self._timeout * 1000, request_id)
+                last_error = PalveronTimeoutError(self._timeout * 1000, request_id)
             except (httpx.ConnectError, httpx.NetworkError):
                 self._circuit.on_failure()
-                last_error = VexisError("Network error", code="NETWORK_ERROR", retryable=True)
-            except VexisError as e:
+                last_error = PalveronError("Network error", code="NETWORK_ERROR", retryable=True)
+            except PalveronError as e:
                 if not e.retryable:
                     raise
                 last_error = e
-        raise last_error or VexisError("Max retries exceeded", code="MAX_RETRIES")
+        raise last_error or PalveronError("Max retries exceeded", code="MAX_RETRIES")

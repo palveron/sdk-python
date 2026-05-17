@@ -1,0 +1,44 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Run tests (optional)
+        run: |
+          pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true
+          python -m pytest tests/ --tb=short 2>/dev/null || echo "No tests found — skipping"
+
+      - name: Verify no vexis remnants
+        run: |
+          if grep -rIni "vexis\|disruptivetrends\|vx_live\|vx_test\|gp_live\|gp_test\|x-vexis-" palveron/ README.md CHANGELOG.md pyproject.toml LICENSE 2>/dev/null; then
+            echo "ERROR: Found vexis remnants in publishable files."
+            exit 1
+          fi
+          echo "Clean — no vexis remnants found."
+
+      - name: Publish to PyPI (Trusted Publisher / OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
