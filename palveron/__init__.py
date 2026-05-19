@@ -36,7 +36,7 @@ from typing import Any, Optional, Sequence
 
 import httpx
 
-__version__ = "0.5.0"
+__version__ = "1.1.0"
 __all__ = [
     "Palveron",
     "AsyncPalveron",
@@ -60,10 +60,41 @@ logger = logging.getLogger("palveron")
 
 
 class Decision(str, Enum):
+    """
+    Governance decision returned by ``/api/v1/verify``.
+
+    The gateway emits ``PASSED`` (Sprint 73+); ``ALLOWED`` is preserved
+    as an alias for older deployments. ``RATE_LIMITED`` is synthesised
+    client-side when the gateway returns 429, so callers can branch on
+    ``decision`` uniformly instead of catching an exception just for
+    rate-limit hits.
+
+    HTTP status code mapping (Sprint 87):
+
+    * ``PASSED`` / ``ALLOWED`` / ``MODIFIED`` / ``FLAGGED`` /
+      ``POLICY_CHANGE`` → 200 OK
+    * ``PENDING_APPROVAL`` → 202 Accepted
+    * ``BLOCKED`` → 403 Forbidden
+    * ``RATE_LIMITED`` → 429 Too Many Requests
+    * ``ERROR`` → transport/internal failure
+    """
+
+    PASSED = "PASSED"
     ALLOWED = "ALLOWED"
     BLOCKED = "BLOCKED"
     MODIFIED = "MODIFIED"
+    FLAGGED = "FLAGGED"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    POLICY_CHANGE = "POLICY_CHANGE"
+    RATE_LIMITED = "RATE_LIMITED"
     ERROR = "ERROR"
+
+    @classmethod
+    def _missing_(cls, value: Any) -> "Decision":
+        # Forward-compat: unknown decisions from a newer gateway should
+        # not raise — surface as ERROR so the caller can decide.
+        logger.warning("Unknown Decision value from gateway: %r — falling back to ERROR", value)
+        return cls.ERROR
 
 
 class RiskLevel(str, Enum):
@@ -156,14 +187,28 @@ class VerifyResponse:
     content_type: str
     findings: list[Finding]
     latency_ms: float
+    #: Retry hint when ``decision == RATE_LIMITED`` — derived from the
+    #: gateway's ``Retry-After`` header (in milliseconds). Honour it
+    #: before issuing the next request.
+    retry_after_ms: Optional[int] = None
+    #: HTTP status code that produced this response (200, 202, 403, 429).
+    http_status: Optional[int] = None
 
     @property
     def is_allowed(self) -> bool:
-        return self.decision == Decision.ALLOWED
+        return self.decision in (Decision.ALLOWED, Decision.PASSED)
 
     @property
     def is_blocked(self) -> bool:
         return self.decision == Decision.BLOCKED
+
+    @property
+    def is_pending_approval(self) -> bool:
+        return self.decision == Decision.PENDING_APPROVAL
+
+    @property
+    def is_rate_limited(self) -> bool:
+        return self.decision == Decision.RATE_LIMITED
 
     @property
     def has_findings(self) -> bool:
@@ -263,7 +308,13 @@ class _CircuitBreaker:
 # ── Response Parser ──────────────────────────────────────────
 
 
-def _parse_verify_response(data: dict[str, Any], latency_ms: float) -> VerifyResponse:
+def _parse_verify_response(
+    data: dict[str, Any],
+    latency_ms: float,
+    *,
+    http_status: Optional[int] = None,
+    retry_after_ms: Optional[int] = None,
+) -> VerifyResponse:
     findings = [
         Finding(
             risk=f.get("risk", "LOW"),
@@ -273,10 +324,23 @@ def _parse_verify_response(data: dict[str, Any], latency_ms: float) -> VerifyRes
         )
         for f in (data.get("findings") or [])
     ]
+    # Decision precedence: body field > synthesised from HTTP status > ERROR.
+    raw_decision = data.get("decision")
+    if raw_decision:
+        decision = Decision(raw_decision)
+    elif http_status is not None:
+        decision = _decision_from_status(http_status)
+    else:
+        decision = Decision.ERROR
+
+    # Fall back to body.error when the body has no `reason` field
+    # (notably 429 rate-limit responses use a different body shape).
+    reason = data.get("reason") or data.get("error") or ""
+
     return VerifyResponse(
-        decision=Decision(data.get("decision", "ERROR")),
+        decision=decision,
         output=data.get("output", ""),
-        reason=data.get("reason", ""),
+        reason=reason,
         trace_id=data.get("trace_id", ""),
         integrity_hash=data.get("integrity_hash", ""),
         should_anchor=data.get("should_anchor", False),
@@ -285,7 +349,52 @@ def _parse_verify_response(data: dict[str, Any], latency_ms: float) -> VerifyRes
         content_type=data.get("content_type", "text"),
         findings=findings,
         latency_ms=latency_ms,
+        retry_after_ms=retry_after_ms,
+        http_status=http_status,
     )
+
+
+def _decision_from_status(status: int) -> Decision:
+    """Synthesise a Decision from an HTTP status code when the response
+    body has no `decision` field (notably 429 rate-limit responses)."""
+    if status == 429:
+        return Decision.RATE_LIMITED
+    if status == 403:
+        return Decision.BLOCKED
+    if status == 202:
+        return Decision.PENDING_APPROVAL
+    if 200 <= status < 300:
+        return Decision.PASSED
+    return Decision.ERROR
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[int]:
+    """Parse an HTTP ``Retry-After`` header into milliseconds.
+
+    Per RFC 7231 the value can be either delta-seconds (an integer) or
+    an HTTP-date. We support both. Returns ``None`` when the header is
+    missing or unparseable so the caller can apply its own default.
+    """
+    if not value:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    # Try delta-seconds first
+    try:
+        seconds = float(trimmed)
+        if seconds >= 0:
+            return int(seconds * 1000)
+    except ValueError:
+        pass
+    # Try HTTP-date
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(trimmed)
+        delta_ms = int((dt.timestamp() - time.time()) * 1000)
+        return max(delta_ms, 0)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_verify_body(request: VerifyRequest) -> dict[str, Any]:
@@ -410,14 +519,31 @@ class Palveron:
     # ── Public API ───────────────────────────────────────
 
     def verify(self, request: str | VerifyRequest) -> VerifyResponse:
-        """Send a governance verification request."""
+        """Send a governance verification request.
+
+        Sprint 87 — the gateway maps the ``decision`` field onto HTTP
+        status codes (200 PASSED / 202 PENDING_APPROVAL / 403 BLOCKED /
+        429 RATE_LIMITED). This method treats all four as legitimate
+        governance outcomes and returns a ``VerifyResponse`` for each;
+        it does **not** raise on 403 / 429. Only transport, auth,
+        validation, and 5xx failures raise.
+        """
         if isinstance(request, str):
             request = VerifyRequest(prompt=request)
         body = _build_verify_body(request)
         start = time.monotonic()
-        raw = self._request("POST", "/api/v1/verify", json=body)
+        result = self._request(
+            "POST", "/api/v1/verify",
+            json=body,
+            expect_governance_decision=True,
+        )
         latency = (time.monotonic() - start) * 1000
-        return _parse_verify_response(raw, latency)
+        return _parse_verify_response(
+            result["body"],
+            latency,
+            http_status=result["status"],
+            retry_after_ms=result.get("retry_after_ms"),
+        )
 
     def check(self, prompt: str) -> VerifyResponse:
         """Quick text-only verification."""
@@ -430,7 +556,7 @@ class Palveron:
 
     def health(self) -> HealthResponse:
         """Check gateway health."""
-        data = self._request("GET", "/health")
+        data = self._request("GET", "/health")["body"]
         return HealthResponse(status=data.get("status", "unknown"), version=data.get("version", ""), uptime=data.get("uptime", 0))
 
     @property
@@ -439,7 +565,26 @@ class Palveron:
 
     # ── Internal ─────────────────────────────────────────
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        expect_governance_decision: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Issue an HTTP request with retry + circuit-breaker + timeout.
+
+        Returns a dict with keys ``body`` (the parsed JSON), ``status``
+        (the HTTP status code) and optionally ``retry_after_ms`` for
+        rate-limited responses.
+
+        When ``expect_governance_decision`` is True, the verify-path
+        status codes (202 / 403 / 429) are returned as governance
+        results instead of being raised as exceptions. Other endpoints
+        keep the strict throw-on-non-2xx behaviour so 429 on idempotent
+        reads (e.g. listPolicies) still retries with backoff.
+        """
         if not self._circuit.can_request():
             raise PalveronCircuitOpenError()
 
@@ -457,7 +602,22 @@ class Palveron:
 
                 if resp.is_success:
                     self._circuit.on_success()
-                    return resp.json()
+                    return {"body": resp.json(), "status": resp.status_code}
+
+                # ── Sprint 87 governance status codes ──
+                if expect_governance_decision and resp.status_code in (202, 403, 429):
+                    self._circuit.on_success()  # not a transport failure
+                    body = self._safe_json(resp)
+                    retry_after = (
+                        _parse_retry_after(resp.headers.get("retry-after"))
+                        if resp.status_code == 429
+                        else None
+                    )
+                    return {
+                        "body": body,
+                        "status": resp.status_code,
+                        "retry_after_ms": retry_after,
+                    }
 
                 self._handle_error(resp, rid, attempt)
 
@@ -474,11 +634,18 @@ class Palveron:
 
         raise last_error or PalveronError("Max retries exceeded", code="MAX_RETRIES")
 
+    @staticmethod
+    def _safe_json(resp: httpx.Response) -> dict[str, Any]:
+        try:
+            return resp.json()
+        except Exception:  # noqa: BLE001
+            return {}
+
     def _handle_error(self, resp: httpx.Response, request_id: str, attempt: int) -> None:
         if resp.status_code == 401:
             raise PalveronAuthenticationError(request_id=request_id)
         if resp.status_code == 429:
-            retry_after = int(resp.headers.get("retry-after", "5")) * 1000
+            retry_after = _parse_retry_after(resp.headers.get("retry-after")) or 5000
             raise PalveronRateLimitError("Rate limit exceeded", retry_after, request_id)
         if resp.status_code == 400:
             body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
@@ -529,13 +696,28 @@ class AsyncPalveron:
         await self._client.aclose()
 
     async def verify(self, request: str | VerifyRequest) -> VerifyResponse:
+        """Send a governance verification request (async).
+
+        See :meth:`Palveron.verify` for the Sprint 87 HTTP-status
+        contract — 202 / 403 / 429 surface as governance outcomes,
+        not exceptions.
+        """
         if isinstance(request, str):
             request = VerifyRequest(prompt=request)
         body = _build_verify_body(request)
         start = time.monotonic()
-        raw = await self._request("POST", "/api/v1/verify", json=body)
+        result = await self._request(
+            "POST", "/api/v1/verify",
+            json=body,
+            expect_governance_decision=True,
+        )
         latency = (time.monotonic() - start) * 1000
-        return _parse_verify_response(raw, latency)
+        return _parse_verify_response(
+            result["body"],
+            latency,
+            http_status=result["status"],
+            retry_after_ms=result.get("retry_after_ms"),
+        )
 
     async def check(self, prompt: str) -> VerifyResponse:
         return await self.verify(prompt)
@@ -545,10 +727,17 @@ class AsyncPalveron:
         return await self.verify(VerifyRequest(prompt=prompt, attachments=[attachment]))
 
     async def health(self) -> HealthResponse:
-        data = await self._request("GET", "/health")
+        data = (await self._request("GET", "/health"))["body"]
         return HealthResponse(status=data.get("status", "unknown"), version=data.get("version", ""), uptime=data.get("uptime", 0))
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        expect_governance_decision: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         if not self._circuit.can_request():
             raise PalveronCircuitOpenError()
         last_error: Optional[Exception] = None
@@ -561,12 +750,29 @@ class AsyncPalveron:
                 resp = await self._client.request(method, path, headers={"X-Request-ID": request_id}, **kwargs)
                 if resp.is_success:
                     self._circuit.on_success()
-                    return resp.json()
+                    return {"body": resp.json(), "status": resp.status_code}
                 rid = resp.headers.get("x-request-id", request_id)
+
+                # ── Sprint 87 governance status codes ──
+                if expect_governance_decision and resp.status_code in (202, 403, 429):
+                    self._circuit.on_success()  # not a transport failure
+                    body = self._safe_json(resp)
+                    retry_after = (
+                        _parse_retry_after(resp.headers.get("retry-after"))
+                        if resp.status_code == 429
+                        else None
+                    )
+                    return {
+                        "body": body,
+                        "status": resp.status_code,
+                        "retry_after_ms": retry_after,
+                    }
+
                 if resp.status_code == 401:
                     raise PalveronAuthenticationError(request_id=rid)
                 if resp.status_code == 429:
-                    raise PalveronRateLimitError("Rate limit exceeded", int(resp.headers.get("retry-after", "5")) * 1000, rid)
+                    retry_after = _parse_retry_after(resp.headers.get("retry-after")) or 5000
+                    raise PalveronRateLimitError("Rate limit exceeded", retry_after, rid)
                 if resp.status_code == 400:
                     body = resp.json() if "json" in resp.headers.get("content-type", "") else {}
                     raise PalveronValidationError(body.get("error", "Bad request"), body.get("field"), rid)
@@ -586,3 +792,10 @@ class AsyncPalveron:
                     raise
                 last_error = e
         raise last_error or PalveronError("Max retries exceeded", code="MAX_RETRIES")
+
+    @staticmethod
+    def _safe_json(resp: httpx.Response) -> dict[str, Any]:
+        try:
+            return resp.json()
+        except Exception:  # noqa: BLE001
+            return {}

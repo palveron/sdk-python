@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "palveron-sdk"
-version = "1.0.0"
+version = "1.1.0"
 description = "Official Palveron Python SDK — AI Governance Gateway client for policy enforcement, trace verification, and compliance automation."
 readme = "README.md"
 license = { text = "MIT" }
