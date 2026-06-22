@@ -449,7 +449,7 @@ class Palveron:
     Synchronous PALVERON client.
 
     Args:
-        api_key: Your project API key (starts with ``pv_live_`` or ``pv_test_``).
+        api_key: Your project API key (starts with ``pv_live_``).
         base_url: Gateway URL. Defaults to ``https://gateway.palveron.com``.
         timeout: Request timeout in seconds. Defaults to ``30.0``.
         max_retries: Maximum retry attempts on transient failures. Defaults to ``3``.
