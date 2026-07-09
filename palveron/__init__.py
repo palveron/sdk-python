@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import httpx
 
@@ -236,12 +236,18 @@ class PalveronError(Exception):
         status_code: int = 0,
         request_id: Optional[str] = None,
         retryable: bool = False,
+        server_code: Optional[str] = None,
     ):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
         self.request_id = request_id
         self.retryable = retryable
+        # B1d: the gateway's stable snake_case taxonomy code from the structured
+        # error contract (``{"error": {"code", "message", "request_id"}}``),
+        # e.g. ``validation_error`` / ``forbidden``. Distinct from ``code`` (the
+        # SDK-side category). ``None`` for legacy flat-string / unparseable bodies.
+        self.server_code = server_code
 
 
 class PalveronAuthenticationError(PalveronError):
@@ -269,6 +275,39 @@ class PalveronTimeoutError(PalveronError):
 class PalveronCircuitOpenError(PalveronError):
     def __init__(self) -> None:
         super().__init__("Circuit breaker open — too many consecutive failures", code="CIRCUIT_OPEN", status_code=503)
+
+
+# ── Error-body parsing (tolerant of both contract shapes) ────
+
+
+def _parse_error_body(body: Any) -> Dict[str, Optional[str]]:
+    """Extract ``{"message", "code", "request_id", "field"}`` from a gateway
+    error body, tolerant of BOTH contract shapes so a caller never sees a dict
+    rendered as a message or an empty string:
+
+    * NEW (B1a+): ``{"error": {"code", "message", "request_id"}}`` — object.
+    * LEGACY:     ``{"error": "<message>"}`` — flat string.
+    * Fallback:   top-level ``message`` string.
+
+    Defensive: non-dict / missing / wrong-typed fields → ``None``, never raises.
+    """
+    out: Dict[str, Optional[str]] = {"message": None, "code": None, "request_id": None, "field": None}
+    if not isinstance(body, dict):
+        return out
+    err = body.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message")
+        out["message"] = msg if isinstance(msg, str) else (body.get("message") if isinstance(body.get("message"), str) else None)
+        out["code"] = err.get("code") if isinstance(err.get("code"), str) else None
+        out["request_id"] = err.get("request_id") if isinstance(err.get("request_id"), str) else None
+    elif isinstance(err, str):
+        out["message"] = err
+    elif isinstance(body.get("message"), str):
+        out["message"] = body.get("message")
+    # Legacy top-level ``field`` on validation errors (absent in the new contract).
+    if isinstance(body.get("field"), str):
+        out["field"] = body.get("field")
+    return out
 
 
 # ── Circuit Breaker ──────────────────────────────────────────
@@ -649,7 +688,8 @@ class Palveron:
             raise PalveronRateLimitError("Rate limit exceeded", retry_after, request_id)
         if resp.status_code == 400:
             body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            raise PalveronValidationError(body.get("error", "Bad request"), body.get("field"), request_id)
+            parsed = _parse_error_body(body)
+            raise PalveronValidationError(parsed["message"] or "Bad request", parsed["field"], request_id)
         if resp.status_code >= 500:
             self._circuit.on_failure()
             raise PalveronError(f"Server error {resp.status_code}", code="SERVER_ERROR", status_code=resp.status_code, request_id=request_id, retryable=True)
@@ -775,7 +815,8 @@ class AsyncPalveron:
                     raise PalveronRateLimitError("Rate limit exceeded", retry_after, rid)
                 if resp.status_code == 400:
                     body = resp.json() if "json" in resp.headers.get("content-type", "") else {}
-                    raise PalveronValidationError(body.get("error", "Bad request"), body.get("field"), rid)
+                    parsed = _parse_error_body(body)
+                    raise PalveronValidationError(parsed["message"] or "Bad request", parsed["field"], rid)
                 if resp.status_code >= 500:
                     self._circuit.on_failure()
                     last_error = PalveronError(f"Server error {resp.status_code}", code="SERVER_ERROR", status_code=resp.status_code, request_id=rid, retryable=True)
